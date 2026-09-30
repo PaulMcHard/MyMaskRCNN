@@ -1,0 +1,9 @@
+unseen_results/
+test_results/
+inference_results/
+optimized_results/
+output/
+
+adam3d/
+coco_unseen/
+coco-annotations/
