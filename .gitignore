@@ -4,6 +4,6 @@ inference_results/
 optimized_results/
 output/
 
-adam3d/
+#adam3d/
 coco_unseen/
 coco-annotations/
