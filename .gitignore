@@ -5,5 +5,5 @@ optimized_results/
 output/
 
 #adam3d/
-coco_unseen/
-coco-annotations/
+#coco_unseen/
+#coco-annotations/
