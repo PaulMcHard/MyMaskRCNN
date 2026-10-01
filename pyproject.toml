@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "maskrcnn-modules"
+version = "0.1.0"
+description = "Supervised Mask R-CNN (torchvision) wrapped as an anomalib AnomalibModule, evaluated with the SuperDefectExperiments metric suite."
+requires-python = ">=3.10"
+dependencies = [
+    # Same pin as SuperDefectExperiments so the vendored evaluator behaves identically.
+    "anomalib==2.5.0",
+    "torch",
+    "torchvision",
+    "torchmetrics",
+    # COCO polygon rasterisation + the backend of torchmetrics' MeanAveragePrecision.
+    "pycocotools",
+    "scipy",
+    # anomalib 2.5.0's split comparisons break on pandas 3.x (see SuperDefectExperiments).
+    "pandas<3",
+    "Pillow",
+    "PyYAML",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+wandb = ["wandb"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

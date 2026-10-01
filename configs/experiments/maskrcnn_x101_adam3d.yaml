@@ -1,0 +1,62 @@
+# Mask R-CNN with the ResNeXt-101 64x4d FPN backbone of the earlier MMDetection
+# runs (train_tb.py). torchvision has no COCO detector weights for this
+# backbone, so only the backbone is pretrained (ImageNet).
+#
+# Differs from maskrcnn_adam3d.yaml in `experiment.name`, `model.backbone`,
+# `model.pretrained`, `data.train_batch_size` and `logging.wandb.group`.
+#
+# Run:
+#   python main.py --config configs/experiments/maskrcnn_x101_adam3d.yaml
+
+experiment:
+  name: maskrcnn_x101_adam3d
+  seed: 42
+  supervision_regime: fully_supervised
+  save_per_image_metrics: true
+  test_pooled: false
+model:
+  class_path: maskrcnn_modules.maskrcnn.MaskRCNN
+  init_args:
+    num_classes: 8
+    backbone: resnext101_64x4d
+    pretrained: imagenet
+    trainable_backbone_layers: 3
+    min_size: 1024
+    max_size: 1280
+    box_score_thresh: 0.05
+    box_detections_per_img: 100
+    lr: 0.01
+    momentum: 0.9
+    weight_decay: 0.001
+    warmup_steps: 500
+    gradient_clip_val: 35.0
+    log_val_loss: true
+data:
+  class_path: maskrcnn_modules.data.CocoInstanceDataModule
+  init_args:
+    root: ./datasets/adam3d_supervised
+    good_root: D:/Data/3d-adam-full-masked
+    train_ann_file: adam3d/annotations_train.json
+    val_ann_file: adam3d/annotations_val_good.json
+    test_ann_file: adam3d/annotations_test_good.json
+    train_batch_size: 2           # the larger backbone needs more GPU memory per image
+    eval_batch_size: 2
+    num_workers: 8
+    train_augment: true
+    crop_size: 1024
+    resize_range: [1024, 1434]
+    mask_source: png
+trainer:
+  accelerator: auto
+  devices: 1
+  precision: 32
+  max_steps: 40000                # same number of images seen as 20000 steps at batch 4
+  val_check_interval: 1000
+  check_val_every_n_epoch: null
+  log_every_n_steps: 50
+results_dir: ./results
+logging:
+  wandb:
+    project: SuperDefectExperiments
+    entity: null
+    group: maskrcnn_x101_adam3d

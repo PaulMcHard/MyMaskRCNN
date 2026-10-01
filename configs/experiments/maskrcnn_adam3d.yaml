@@ -1,0 +1,70 @@
+# Mask R-CNN (ResNet-50 FPN, COCO-pretrained) on 3D-ADAM, MechMind-Nano images.
+#
+# One model is trained on every part, thresholds are fitted once on the pooled
+# validation split, and each part is then tested separately.
+#
+# Prerequisite (once):
+#   python scripts/add_good_images.py adam3d --good-root <3d-adam-full-masked>
+#
+# Run:
+#   python main.py --config configs/experiments/maskrcnn_adam3d.yaml
+
+experiment:
+  name: maskrcnn_adam3d
+  seed: 42
+  supervision_regime: fully_supervised
+  save_per_image_metrics: true
+  # Also score all test images in one pass (a `pooled` row in metrics.csv).
+  # The pixel curve metrics hold every test pixel in memory: budget ~30 GB of
+  # RAM for the ~390 full-resolution test images. Per-part rows need ~1 GB.
+  test_pooled: false
+  # parts: [1m1, tapa3m1]     # default: every part in the test annotations
+model:
+  class_path: maskrcnn_modules.maskrcnn.MaskRCNN
+  init_args:
+    num_classes: 8            # 7 defect categories + background
+    backbone: resnet50
+    pretrained: coco
+    trainable_backbone_layers: 3
+    min_size: 1024            # native resolution: no downscaling of 1024x1280 images
+    max_size: 1280
+    box_score_thresh: 0.05
+    box_detections_per_img: 100
+    lr: 0.01
+    momentum: 0.9
+    weight_decay: 0.001
+    warmup_steps: 500
+    gradient_clip_val: 35.0
+    log_val_loss: true
+data:
+  class_path: maskrcnn_modules.data.CocoInstanceDataModule
+  init_args:
+    # Directory the COCO file_name values are relative to
+    # (<root>/<model_id>/<defect_type>/rgb/<name>.png).
+    root: ./datasets/adam3d_supervised
+    # Root of the 3d-adam-full-masked layout, for the good images.
+    good_root: D:/Data/3d-adam-full-masked
+    train_ann_file: adam3d/annotations_train.json
+    val_ann_file: adam3d/annotations_val_good.json
+    test_ann_file: adam3d/annotations_test_good.json
+    train_batch_size: 4
+    eval_batch_size: 2
+    num_workers: 8
+    train_augment: true
+    crop_size: 1024
+    resize_range: [1024, 1434]
+    mask_source: png
+trainer:
+  accelerator: auto
+  devices: 1
+  precision: 32
+  max_steps: 20000
+  val_check_interval: 500
+  check_val_every_n_epoch: null   # count val_check_interval in steps across epochs
+  log_every_n_steps: 50
+results_dir: ./results
+logging:
+  wandb:
+    project: SuperDefectExperiments
+    entity: null
+    group: maskrcnn_adam3d

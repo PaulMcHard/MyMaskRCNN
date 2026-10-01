@@ -1,0 +1,47 @@
+# Smoke test on real data: two parts, 50 steps, no W&B. Checks the whole
+# pipeline (data, training, threshold fit, per-part + pooled test, CSVs) in a
+# few minutes. The metrics themselves are meaningless at this training length.
+#
+# Run:
+#   python main.py --config configs/experiments/maskrcnn_adam3d_smoke.yaml
+
+experiment:
+  name: maskrcnn_adam3d_smoke
+  seed: 42
+  supervision_regime: fully_supervised
+  save_per_image_metrics: true
+  test_pooled: false
+  parts: [1m1, tapa3m1]
+model:
+  class_path: maskrcnn_modules.maskrcnn.MaskRCNN
+  init_args:
+    num_classes: 8
+    backbone: resnet50
+    pretrained: coco
+    min_size: 1024
+    max_size: 1280
+    lr: 0.01
+    warmup_steps: 10
+    log_val_loss: true
+    visualizer: false
+data:
+  class_path: maskrcnn_modules.data.CocoInstanceDataModule
+  init_args:
+    root: ./datasets/adam3d_supervised
+    good_root: D:/Data/3d-adam-full-masked
+    train_ann_file: adam3d/annotations_train.json
+    val_ann_file: adam3d/annotations_val_good.json
+    test_ann_file: adam3d/annotations_test_good.json
+    train_batch_size: 2
+    eval_batch_size: 2
+    num_workers: 2
+trainer:
+  accelerator: auto
+  devices: 1
+  precision: 32
+  max_steps: 50
+  val_check_interval: 25
+  check_val_every_n_epoch: null
+  limit_val_batches: 20           # 40 validation images instead of all ~380
+  log_every_n_steps: 5
+results_dir: ./results
