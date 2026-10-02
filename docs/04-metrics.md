@@ -29,7 +29,7 @@ Detection metrics are reported alongside, computed in the Lightning module with 
 | `bbox_mAP`, `bbox_mAP_50`, `bbox_mAP_75` | COCO box mAP, averaged over IoU 0.50:0.95, at 0.50, at 0.75 |
 | `segm_mAP`, `segm_mAP_50`, `segm_mAP_75` | COCO mask mAP, same thresholds |
 
-These keep continuity with the earlier MMDetection runs, which reported `coco/bbox_mAP` and `coco/segm_mAP`. They are not identical to those numbers: the ground-truth instance masks now come from the original PNGs, not from the COCO polygons (see [03-data-protocol.md](03-data-protocol.md)).
+These keep continuity with the earlier MMDetection runs, which reported `coco/bbox_mAP` and `coco/segm_mAP`. They are not comparable with those numbers: the annotations were rebuilt with corrected labels (11 defect types), pixel-exact masks and a specimen-level split (see [03-data-protocol.md](03-data-protocol.md)).
 
 ## Where each input comes from
 
@@ -65,7 +65,7 @@ Thresholds must be fitted with the same weights that are tested. The runner call
 
 ### The one deviation from stock: how the pixel threshold is stored
 
-anomalib's pixel threshold metric keeps every validation pixel and sorts them. Measured here, that costs about 1 GB of RAM per 20 images at 1024x1280, so roughly 19 GB for the 378 pooled validation images, on every validation loop.
+anomalib's pixel threshold metric keeps every validation pixel and sorts them. Measured here, that costs about 1 GB of RAM per 20 images at 1024x1280, so roughly 17 GB for the 336 pooled validation images, on every validation loop.
 
 `DetectionPostProcessor` replaces only that metric with `SparseF1AdaptiveThreshold`. A detector's anomaly map is exactly zero outside its detections, so the metric stores non-zero-score pixels individually and counts the rest. The precision-recall curve, F1 formula, tie-breaking and missing-class fallbacks are the same. `tests/test_post_processing.py` checks the threshold is equal to anomalib's on sparse maps, dense maps, heavily tied scores, and both fallback cases.
 
@@ -77,7 +77,7 @@ anomalib's pixel threshold metric keeps every validation pixel and sorts them. M
 | `mean` | Mean of the per-part rows. This is the headline, as in `SuperDefectExperiments`. |
 | `pooled` | All test images scored in one pass. Off by default (`experiment.test_pooled`). |
 
-The `pooled` row is off by default because the four pixel curve metrics (AUROC, F1Max, AUPRO, AP) are the stock anomalib ones and hold every test pixel in memory. For the 382 test images that is roughly 30 GB of RAM (about 19 GB to sort one metric plus about 2 GB of stored pixels for each of the four), extrapolated from the 20-image measurement above. A per-part test holds about 18 images and needs about 1 GB.
+The `pooled` row is off by default because the four pixel curve metrics (AUROC, F1Max, AUPRO, AP) are the stock anomalib ones and hold every test pixel in memory. For the 432 test images that is roughly 35 GB of RAM (about 22 GB to sort one metric plus about 2.6 GB of stored pixels for each of the four), extrapolated from the 20-image measurement above. Per-part tests hold 30 to 80 images and need up to about 6 GB.
 
 ## Provenance of the vendored code
 
@@ -95,7 +95,7 @@ The vendored module also contains `MacroDice`, `MeanIoU`, `InstanceIoU` and `Ins
 
 - **Ties at zero.** A detector scores most pixels exactly 0. Anomaly-map methods give every pixel a distinct score. Pixel AUROC, AUPRO and AP for Mask R-CNN therefore have a large tie mass at the low end, and the curves are only informative above the detection score floor (`box_score_thresh`, default 0.05). Lowering the floor and raising `box_detections_per_img` densifies the map at the cost of memory.
 - **Not image-paired.** The test images differ from the anomalib per-part test sets. Compare as unpaired results.
-- **Per-part rows are noisy.** About 9 defect and 9 good test images per part. Use the `mean` row as the headline.
+- **Per-part rows are noisy.** Test parts have 15 to 40 defect images each (plus as many good images). Use the `mean` row as the headline.
 - **Seen parts.** Every part is in the training set.
 - **AUPRO cost.** AUPRO runs connected components on CPU over every test image at 1280x1024. Expect it to dominate test time.
 - **`scratch` has no instances.** It contributes nothing to mAP.

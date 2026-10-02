@@ -5,7 +5,7 @@
 ```
 main.py                                  YAML-driven runner
 configs/experiments/*.yaml               experiment configs
-scripts/add_good_images.py               adds good images to the val/test annotation files
+scripts/build_coco_annotations.py        builds the COCO files from 3d-adam-full-masked on SuperDefect's split
 src/maskrcnn_modules/
   maskrcnn/torch_model.py                torchvision Mask R-CNN + detections -> anomaly map
   maskrcnn/lightning_model.py            MaskRCNN(AnomalibModule)
@@ -105,11 +105,10 @@ Everything anomalib's callbacks expect (`image`, `gt_mask`, `gt_label`, `image_p
 An `AnomalibDataset` built from one COCO JSON.
 
 - Builds the `samples` DataFrame anomalib requires (`image_path`, `split`, `label_index`, `mask_path`) plus a `part` column.
-- Normalises backslashes in `file_name`.
-- Treats entries tagged `source: good` as normal images, resolved against `good_root`.
-- Drops other images that have no annotations.
-- Loads instance masks and the binary mask as described in [03-data-protocol.md](03-data-protocol.md).
-- Applies torchvision v2 transforms jointly to the image, boxes, instance masks and binary mask, then removes instances a crop has pushed out of frame.
+- Treats images with `is_good: true` as normal; drops any other image that has no (remaining) annotations.
+- Decodes each annotation's mask from COCO RLE (polygons are also accepted). `gt_mask` is the union of the instance masks.
+- Applies `ignore_classes`: those types' instances are removed from the targets and from `gt_mask`.
+- Applies torchvision v2 transforms jointly to the image, boxes and instance masks, then removes instances a crop has pushed out of frame.
 - Keeps annotations keyed by image path, so the lookup survives anomalib's re-sorting and subsampling of `samples`.
 
 ### `CocoInstanceDataModule` (`coco_instance.py`)
@@ -118,6 +117,8 @@ An `AnomalibDataModule` over three explicit annotation files.
 
 - `_create_test_split` and `_create_val_split` are overridden to do nothing. anomalib's defaults assume abnormal images are absent from training and, for some split modes, drop the normal test images.
 - `test_parts` restricts only the test split. Validation stays pooled so the thresholds remain shared.
+- `ignore_classes` applies to all three splits.
+- Data loaders keep their workers alive between epochs and validations (`persistent_workers`) and pin host memory when a GPU is present.
 - Training augmentation (on by default) is ported from `train_tb.py`: shorter edge resized to 1024-1434 px, 1024x1024 random crop, horizontal and vertical flips.
 
 ## Runner (`main.py`)
@@ -126,7 +127,7 @@ Same config shape and helper names as `SuperDefectExperiments/main.py` (`instant
 
 ```bash
 python main.py --config configs/experiments/maskrcnn_adam3d.yaml
-python main.py --config configs/experiments/maskrcnn_adam3d.yaml --parts 1m1 tapa3m1
+python main.py --config configs/experiments/maskrcnn_adam3d.yaml --parts 1M1 SpurGear
 python main.py --config configs/experiments/maskrcnn_adam3d.yaml --ckpt-path results/maskrcnn_adam3d/weights/best.ckpt
 ```
 
@@ -150,8 +151,9 @@ anomalib's `Engine` also writes its own workspace under `<results_dir>/MaskRCNN/
 
 | Config | Purpose |
 |---|---|
-| `maskrcnn_adam3d.yaml` | ResNet-50 FPN, COCO-pretrained, 20000 steps at batch 4 |
-| `maskrcnn_x101_adam3d.yaml` | ResNeXt-101 64x4d FPN, ImageNet-pretrained backbone, 40000 steps at batch 2 |
-| `maskrcnn_adam3d_smoke.yaml` | Two parts, 50 steps, no wandb; checks the pipeline on real data |
+| `maskrcnn_adam3d.yaml` | ResNet-50 FPN, COCO-pretrained, 40000 steps at batch 2, lr 0.005. Does not fit a 5 GB GPU inside the full run |
+| `maskrcnn_x101_adam3d.yaml` | ResNeXt-101 64x4d FPN, ImageNet-pretrained backbone, 80000 steps at batch 1, lr 0.0025, only the last backbone stage trainable so it fits a 5 GB GPU |
+| `maskrcnn_adam3d_p2000.yaml` | `maskrcnn_adam3d.yaml` sized for a 5 GB GPU: batch 1, 80000 steps, scaled learning rate |
+| `maskrcnn_adam3d_smoke.yaml` | Two parts, 300 steps at batch 2, no wandb; checks the pipeline on real data and that the model starts detecting |
 
-All three expect `data.init_args.root` to point at the supervised dataset layout and `good_root` at `3d-adam-full-masked`.
+All four read `adam3d/superdefect_default/` and expect `data.init_args.root` to point at `3d-adam-full-masked`. They use `num_classes: 12` and `ignore_classes: []`.

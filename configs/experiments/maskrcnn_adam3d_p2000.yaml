@@ -1,24 +1,23 @@
-# Mask R-CNN (ResNet-50 FPN, COCO-pretrained) on 3D-ADAM, MechMind-Nano images.
+# maskrcnn_adam3d.yaml sized for a 5 GB GPU (Quadro P2000, ~3.9 GB free).
 #
-# One model is trained on every part, thresholds are fitted once on the pooled
-# validation split, and each part is then tested separately.
+# Measured on the P2000 at 1024x1024 training crops:
+#   train batch 1: 0.61 s/step, 2.1 GB    train batch 2: 1.12 s/step, 3.7 GB
+#   train batch 3+: does not fit; Windows spills it into system RAM, 10-20x slower
+#   validation (full 1024x1280): 0.79 s/image with val loss, 0.47 s/image without
 #
-# Annotations: adam3d/superdefect_default/, built by scripts/build_coco_annotations.py
-# on SuperDefect's configs/default.yaml split (see docs/03-data-protocol.md).
-#
-# Batch 2: lr, max_steps, warmup and validation interval are scaled from the
-# batch-4 MMDetection recipe (lr 0.01, 20000 steps) so the model sees the same
-# 80,000 training images with the same schedule shape.
-#
-# On a Quadro P2000 (5 GB) batch 2 does not fit inside the full run: the smoke
-# test trained at 3.8 s/step, so 40000 steps would take ~42 h. Batch 1
-# (maskrcnn_adam3d_p2000.yaml) runs at 0.61 s/step, ~14 h for the same images.
+# Differences from maskrcnn_adam3d.yaml, chosen to see the same 80,000 training
+# images with the same schedule shape:
+#   train_batch_size 4 -> 1, lr 0.01 -> 0.0025 (linear scaling),
+#   max_steps 20000 -> 80000, warmup_steps 500 -> 2000,
+#   val_check_interval 500 -> 4000 (20 validations of ~4.5 min each),
+#   eval_batch_size 2 -> 1, num_workers 8 -> 2.
+# Expected time: about 14 h of training plus 1.5 h of validation.
 #
 # Run:
-#   python main.py --config configs/experiments/maskrcnn_adam3d.yaml
+#   python main.py --config configs/experiments/maskrcnn_adam3d_p2000.yaml
 
 experiment:
-  name: maskrcnn_adam3d
+  name: maskrcnn_adam3d_p2000
   seed: 42
   supervision_regime: fully_supervised
   save_per_image_metrics: true
@@ -38,10 +37,10 @@ model:
     max_size: 1280
     box_score_thresh: 0.05
     box_detections_per_img: 100
-    lr: 0.005                 # 0.01 at batch 4, scaled linearly to batch 2
+    lr: 0.0025
     momentum: 0.9
     weight_decay: 0.001
-    warmup_steps: 1000
+    warmup_steps: 2000
     gradient_clip_val: 35.0
     log_val_loss: true
 data:
@@ -57,8 +56,8 @@ data:
     # [gap, mark, roughess, scratch, warp]; the equivalent here is
     # [gap, mark, scratch, warp] (no roughess masks exist in the Nano images).
     ignore_classes: []
-    train_batch_size: 2
-    eval_batch_size: 1          # validation speed does not depend on batch size; 1 uses least memory
+    train_batch_size: 1
+    eval_batch_size: 1
     num_workers: 2            # one worker prepares ~9 images/s; the GPU trains ~1.7 images/s
     train_augment: true
     crop_size: 1024
@@ -67,8 +66,8 @@ trainer:
   accelerator: gpu               # fail instead of silently training on the CPU
   devices: 1
   precision: 32                  # Pascal GPUs run fp16 far slower than fp32: no mixed precision
-  max_steps: 40000
-  val_check_interval: 2000        # 20 validations of the 336 val images
+  max_steps: 80000
+  val_check_interval: 4000
   check_val_every_n_epoch: null   # count val_check_interval in steps across epochs
   log_every_n_steps: 50
 results_dir: ./results
@@ -76,4 +75,4 @@ logging:
   wandb:
     project: SuperDefectExperiments
     entity: null
-    group: maskrcnn_adam3d
+    group: maskrcnn_adam3d_p2000

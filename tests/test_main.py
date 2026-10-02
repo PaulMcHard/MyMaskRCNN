@@ -62,7 +62,7 @@ def test_instantiate_resolves_nested_class_paths(main_module):
 
 
 def test_discover_parts_lists_parts_with_annotated_images(main_module, datamodule_kwargs):
-    assert main_module.discover_parts({"init_args": datamodule_kwargs}) == ["1m1", "tapa3m1"]
+    assert main_module.discover_parts({"init_args": datamodule_kwargs}) == ["1M1", "Tapa3M1"]
 
 
 def test_run_experiment_writes_metrics_and_per_image_csvs(main_module, datamodule_kwargs, tmp_path):
@@ -70,19 +70,19 @@ def test_run_experiment_writes_metrics_and_per_image_csvs(main_module, datamodul
 
     frame = main_module.run_experiment(config)
 
-    assert list(frame.index) == ["1m1", "tapa3m1", "mean", "pooled"]
+    assert list(frame.index) == ["1M1", "Tapa3M1", "mean", "pooled"]
     for column in ("image_AUROC", "pixel_AUPRO", "pixel_BFScore1", "segm_mAP"):
         assert column in frame.columns
 
     output_dir = tmp_path / "maskrcnn_test"
     saved = pd.read_csv(output_dir / "metrics.csv", index_col="category")
-    assert list(saved.index) == ["1m1", "tapa3m1", "mean", "pooled"]
+    assert list(saved.index) == ["1M1", "Tapa3M1", "mean", "pooled"]
     with (output_dir / "resolved_config.yaml").open() as f:
         assert yaml.safe_load(f)["experiment"]["name"] == "maskrcnn_test"
     assert (output_dir / "weights" / "best.ckpt").exists()
 
-    per_image = pd.read_csv(output_dir / "1m1" / "per_image_metrics.csv")
-    # 2 defect + 2 good test images for this part; the unannotated defect image is excluded.
+    per_image = pd.read_csv(output_dir / "1M1" / "per_image_metrics.csv")
+    # 2 defect + 2 good test images for this part; the image without masks was excluded by the generator.
     assert len(per_image) == 4
     assert {"image_path", "gt_label", "pred_label", "pred_score", "pixel_iou", "pixel_dice", "pixel_ap"} <= set(
         per_image.columns,
@@ -92,12 +92,12 @@ def test_run_experiment_writes_metrics_and_per_image_csvs(main_module, datamodul
 
 def test_run_experiment_can_evaluate_an_existing_checkpoint(main_module, datamodule_kwargs, tmp_path):
     config = _config(datamodule_kwargs, tmp_path)
-    main_module.run_experiment(config, parts=["1m1"])
+    main_module.run_experiment(config, parts=["1M1"])
     checkpoint = tmp_path / "maskrcnn_test" / "weights" / "best.ckpt"
 
     config["experiment"]["name"] = "maskrcnn_eval_only"
     config["experiment"]["test_pooled"] = False
-    frame = main_module.run_experiment(config, parts=["tapa3m1"], ckpt_path=checkpoint)
+    frame = main_module.run_experiment(config, parts=["Tapa3M1"], ckpt_path=checkpoint)
 
-    assert list(frame.index) == ["tapa3m1", "mean"]
+    assert list(frame.index) == ["Tapa3M1", "mean"]
     assert not (tmp_path / "maskrcnn_eval_only" / "weights" / "best.ckpt").exists()

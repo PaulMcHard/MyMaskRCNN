@@ -7,12 +7,13 @@
 | 1 | Planning docs in `docs/` | Done |
 | 2 | Package skeleton (`pyproject.toml`) and API check against anomalib 2.5.0 | Done |
 | 3 | Vendor `metrics.py`, `reporting.py`, `stats.py` and their tests | Done |
-| 4 | Data: `add_good_images.py`, instance dataclasses, COCO dataset and datamodule | Done |
+| 4 | Data: instance dataclasses, COCO dataset and datamodule | Done |
+| 4b | Rebuild the annotations from `3d-adam-full-masked` on SuperDefect's `default.yaml` split (`build_coco_annotations.py`) | Done |
 | 5 | Model: torchvision Mask R-CNN, anomaly-map mapping, Lightning module, post-processor | Done |
 | 6 | Runner, configs, wandb logging | Done |
 | 7 | Tests on a synthetic dataset | Done |
 | 8 | Full training run on the training machine | **Not done** |
-| 9 | Compare validation mask mAP with the earlier MMDetection runs | **Not done** (needs step 8) |
+| 9 | Parity check against MMDetection retrained on the new annotations | **Not done** (needs step 8) |
 | 10 | Online wandb upload to `SuperDefectExperiments` | **Not done** (needs `wandb login`) |
 
 ## API check against anomalib 2.5.0
@@ -32,26 +33,26 @@ The design was first read from anomalib's `main` branch. Each assumption was the
 
 ## What has been verified
 
-All of this ran on the development workstation, on CPU.
+All of this ran on the development workstation, on CPU unless stated.
 
 | Check | Result |
 |---|---|
-| `pytest -q` | 63 tests pass (27 vendored, 36 new) |
+| `pytest -q` | 75 tests pass (27 vendored, 48 new) |
 | Fit, validate, test, predict through anomalib `Engine` on synthetic data | Passes; all 16 evaluator metrics and 6 mAP values are produced |
 | Checkpoint save, reload with `--ckpt-path`, thresholds restored | Passes |
 | `SparseF1AdaptiveThreshold` equals anomalib's `F1AdaptiveThreshold` | Equal in 13 cases: sparse maps, dense maps, heavily tied scores, both missing-class fallbacks |
-| `add_good_images.py` on the real data | 189 val and 191 test good images added; every part matched; no overlap between splits |
-| Dataset on real images (27 defect images, 91 instances, parts `1m1` and `tapa3m1`) | Every instance matched to its PNG; boxes enclose masks before and after augmentation |
-| `main.py` on real images at 1024x1280 with COCO-pretrained weights | 2 training steps, threshold fit and a per-part test complete in about 4 minutes; `metrics.csv` has all 22 columns |
+| `build_coco_annotations.py` on the real data | Defect images per split equal SuperDefect's `default.yaml` split minus 36 mask-less images; all 6850 instances decode to their PNG exactly with the label from the mask name; no specimen folder spans two splits; good images per part equal defect images per part in val and test |
+| `main.py` with the smoke config on the new annotation files (cut to 2 steps, part `1M1`) | Training, threshold fit and the per-part test complete in 13 minutes on CPU; `metrics.csv` has all 22 columns with no NaN; `per_image_metrics.csv` has 80 rows (40 defect, 40 good) |
+| Smoke config on the Quadro P2000 (5 GB) | Completes in 7.8 minutes; training runs at 0.61 s per image, so the training loop is GPU-bound. Batch sizes above 2 do not fit in the free GPU memory |
 | wandb logging, offline mode | Training run and summary run both written |
 
-The real-image checks used a temporary copy of those two parts rebuilt from `3d-adam-full-masked`, because the supervised dataset root is not on this workstation.
+The real-image checks read `3d-adam-full-masked` directly from this workstation.
 
 ## What has not been verified
 
 - **No real training run.** Nothing here shows the model learns; the 2-step run only shows the pipeline executes. Metric values from it are meaningless.
-- **GPU execution.** All runs were on CPU. The code has no device-specific branches, but GPU memory use at batch 4 and 1024x1024 crops is unmeasured.
-- **The supervised dataset root.** Configs point `data.init_args.root` at `./datasets/adam3d_supervised`, a placeholder. It must be set to the directory the COCO `file_name` values are relative to, and that directory must contain the `ground_truth/` PNGs.
+- **GPUs other than the P2000.** Batch 4 at 1024x1024 crops needs about 6.7 GB; it has not been run on a larger card.
+- **Dataset path on the training machine.** Configs point `data.init_args.root` at `D:/Data/3d-adam-full-masked`. Change it if the dataset lives elsewhere.
 - **Online wandb.** See [05-wandb.md](05-wandb.md).
 - **Parity with MMDetection.** torchvision's Mask R-CNN is a different implementation. Until step 9 is done, do not assume the new baseline is as strong as the old one.
 
@@ -61,28 +62,30 @@ The real-image checks used a temporary copy of those two parts rebuilt from `3d-
 pip install -e .[dev,wandb]
 pytest -q
 
-# Set root and good_root in the configs first.
+# Set data.init_args.root in the configs first, if 3d-adam-full-masked is not at D:/Data.
 python main.py --config configs/experiments/maskrcnn_adam3d_smoke.yaml
 wandb login
 python main.py --config configs/experiments/maskrcnn_adam3d.yaml
 ```
 
-Then compare `val/segm_mAP` with the earlier MMDetection runs. Expect some difference in either direction: the ground-truth masks changed from polygons to PNGs, and the default backbone changed from ResNeXt-101 to a COCO-pretrained ResNet-50. `maskrcnn_x101_adam3d.yaml` keeps the old backbone for a closer comparison.
+The earlier MMDetection mAP is no longer a like-for-like reference: the labels, masks, class set and split have all changed, and the old split leaked. Expect lower numbers than before. A fair parity check would retrain the MMDetection config on the new annotation files; `maskrcnn_x101_adam3d.yaml` keeps the old backbone for that comparison.
 
 ## Open risks
 
 | Risk | Mitigation |
 |---|---|
-| The port underperforms the MMDetection baseline | Compare `val/segm_mAP`; try the ResNeXt-101 config; tune `lr` and `trainable_backbone_layers` |
+| The port underperforms MMDetection | Retrain the MMDetection config on the new annotation files and compare; try the ResNeXt-101 config; tune `lr` and `trainable_backbone_layers` |
 | GPU out of memory at batch 4 | Lower `train_batch_size` and raise `max_steps` in proportion; or set `trainer.precision: 16-mixed` |
-| Validation every 500 steps is slow (378 images, two forward passes each when `log_val_loss` is on) | Raise `val_check_interval`, set `log_val_loss: false`, or set `trainer.limit_val_batches` |
+| Validation every 500 steps is slow (336 images, two forward passes each when `log_val_loss` is on) | Raise `val_check_interval`, set `log_val_loss: false`, or set `trainer.limit_val_batches` |
 | Pooled test row runs out of RAM | Leave `test_pooled: false`; the `mean` row is the headline |
 | Score ties at zero distort pixel AUROC / AUPRO / AP relative to dense-map methods | Documented in [04-metrics.md](04-metrics.md); lower `box_score_thresh` for an ablation |
-| Detector over-fires on good parts because it never trains on them | Rerun `add_good_images.py` with `--train-ratio` above 0 and point `train_ann_file` at `annotations_train_good.json` |
+| Detector over-fires on good parts because it never trains on them | Rebuild the annotations with `--train-good-ratio` above 0 |
+| Rare classes are absent from evaluation (no gap, scratch or warp in test) | Inherent to the specimen split; report per-class AP only for classes present |
+| SuperDefect's ground truth differs from ours (its `ignore_classes` and its extrusion regex bug) | See [03-data-protocol.md](03-data-protocol.md); fix the regex and align `ignore_classes` before pairing |
 | Vendored metrics drift from `SuperDefectExperiments` | Re-copy the three files when the source changes; provenance is in each file header |
 
 ## Possible follow-ups
 
-- Part-held-out split, to measure generalisation to unseen parts (`split.py` already supports it).
+- Part-held-out split, to measure generalisation to unseen parts. Its test set would not pair with SuperDefect's.
 - Register the module in `SuperDefectExperiments` configs via `class_path: maskrcnn_modules.maskrcnn.MaskRCNN`, so one runner drives every method.
 - Per-class pixel metrics with the vendored `MeanIoU` / `MacroDice`, using the predicted classes that the anomaly map currently discards.

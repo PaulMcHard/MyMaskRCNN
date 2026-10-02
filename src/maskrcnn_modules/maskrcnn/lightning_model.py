@@ -54,8 +54,9 @@ class MaskRCNN(AnomalibModule):
     """Supervised Mask R-CNN Lightning module.
 
     Args:
-        num_classes: Number of classes including background (7 defect
-            categories + background for 3D-ADAM).
+        num_classes: Number of classes including background (11 defect
+            types + background for 3D-ADAM). Must exceed the largest
+            category id in the annotations; checked when training starts.
         backbone / pretrained / trainable_backbone_layers / min_size /
             max_size / anchor_sizes / aspect_ratios / box_score_thresh /
             box_nms_thresh / box_detections_per_img: See
@@ -75,7 +76,7 @@ class MaskRCNN(AnomalibModule):
 
     def __init__(
         self,
-        num_classes: int = 8,
+        num_classes: int = 12,
         backbone: str = "resnet50",
         pretrained: str = "coco",
         trainable_backbone_layers: int = 3,
@@ -203,6 +204,20 @@ class MaskRCNN(AnomalibModule):
         """Predict and accumulate mAP; the anomalib evaluator scores the returned batch."""
         del args, kwargs
         return self._predict_and_score(batch, self.test_map)
+
+    def on_fit_start(self) -> None:
+        """Check the model has an output for every category in the training annotations.
+
+        Otherwise torchvision fails mid-step with an index error that doesn't
+        name the cause.
+        """
+        categories = getattr(getattr(self.trainer.datamodule, "train_data", None), "categories", None)
+        if categories and max(categories) >= self.model.num_classes:
+            msg = (
+                f"The annotations use category ids up to {max(categories)} but num_classes={self.model.num_classes}; "
+                f"set num_classes to at least {max(categories) + 1} (categories plus background)."
+            )
+            raise ValueError(msg)
 
     def on_validation_epoch_end(self) -> None:
         """Log validation mAP."""

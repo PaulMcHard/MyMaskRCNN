@@ -82,7 +82,7 @@ class MaskRCNNModel(nn.Module):
 
     def __init__(
         self,
-        num_classes: int = 8,
+        num_classes: int = 12,
         backbone: str = "resnet50",
         pretrained: str = "coco",
         trainable_backbone_layers: int = 3,
@@ -95,6 +95,7 @@ class MaskRCNNModel(nn.Module):
         box_detections_per_img: int = 100,
     ) -> None:
         super().__init__()
+        self.num_classes = num_classes
         if pretrained not in {"coco", "imagenet", "none"}:
             msg = f"pretrained must be 'coco', 'imagenet' or 'none', got {pretrained!r}"
             raise ValueError(msg)

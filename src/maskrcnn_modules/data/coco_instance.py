@@ -10,10 +10,11 @@ module supplies:
 - :class:`CocoInstanceDataModule` -- takes explicit train/val/test annotation
   files and bypasses anomalib's automatic split logic.
 
-Images without annotations are treated as follows: entries tagged
-``"source": "good"`` (added by ``scripts/add_good_images.py``) are *normal*
-samples; any other unannotated image is a defect image whose masks are
-missing, and is dropped so it can't be scored as normal.
+The annotation files are those written by ``scripts/build_coco_annotations.py``:
+masks are COCO RLE (polygons are also accepted), images carry ``part`` and
+``is_good``. Images with ``is_good: true`` are *normal* samples; any other
+image without (remaining) annotations is dropped, since its defects would
+otherwise be scored as background.
 """
 
 from __future__ import annotations
@@ -30,16 +31,14 @@ from anomalib.data.datamodules.base.image import AnomalibDataModule
 from anomalib.data.datasets.base.image import AnomalibDataset
 from anomalib.data.utils import LabelName, Split, TestSplitMode, ValSplitMode, read_image
 from pandas import DataFrame
-from PIL import Image as PILImage
 from pycocotools import mask as mask_utils
+from torch.utils.data import DataLoader
 from torchvision.transforms import v2
 from torchvision.tv_tensors import BoundingBoxes, Image, Mask
 
 from maskrcnn_modules.data.dataclasses import InstanceBatch, InstanceItem
 
 log = logging.getLogger(__name__)
-
-MASK_SOURCES = ("polygon", "png")
 
 
 def build_train_augmentations(
@@ -61,8 +60,14 @@ def build_train_augmentations(
     ])
 
 
-def polygons_to_mask(segmentation: Any, height: int, width: int) -> np.ndarray:  # noqa: ANN401
-    """Rasterise one COCO ``segmentation`` (polygon list or RLE) to a ``[H, W]`` uint8 mask."""
+def segmentation_to_mask(segmentation: Any, height: int, width: int) -> np.ndarray:  # noqa: ANN401
+    """Decode one COCO ``segmentation`` to a ``[H, W]`` uint8 mask.
+
+    Accepts compressed RLE (``counts`` as a string, as written by
+    ``build_coco_annotations.py``), uncompressed RLE, or a polygon list.
+    """
+    if isinstance(segmentation, dict) and isinstance(segmentation["counts"], str):
+        return mask_utils.decode({"size": segmentation["size"], "counts": segmentation["counts"].encode("ascii")})
     rles = mask_utils.frPyObjects(segmentation, height, width)
     rle = mask_utils.merge(rles) if isinstance(rles, list) else rles
     return mask_utils.decode(rle)
@@ -75,20 +80,11 @@ class CocoInstanceDataset(AnomalibDataset):
         ann_file: COCO JSON for this split.
         root: Directory the COCO ``file_name`` values are relative to.
         split: Which split this is; stored in the ``samples`` DataFrame.
-        good_root: Directory that ``"source": "good"`` entries are relative
-            to. Defaults to ``root``.
-        mask_source: Where masks come from. ``"png"`` reads the original
-            per-instance mask PNGs found next to the image
-            (``../<mask_dir>/<stem>_*_defect_*.png``): each annotation takes
-            the PNG with the same bounding box and area, and ``gt_mask`` is
-            the union of *all* PNGs, which is what the one-class methods are
-            scored against. ``"polygon"`` rasterises the COCO polygons
-            instead, and is also the per-instance fallback when no PNG
-            matches. Prefer ``"png"``: the polygons are contours traced
-            through pixel centres, and on 3D-ADAM's small defects they
-            rasterise to about 90% of the true mask area.
-        mask_dir: Name of the sibling directory holding the mask PNGs.
-        parts: Keep only images whose ``model_id`` is in this list
+        ignore_classes: Category names to treat as background, as
+            SuperDefect's ``dataset.ignore_classes`` does: their instances
+            are removed from the targets and from ``gt_mask``. A defect image
+            left with no instances is dropped.
+        parts: Keep only images whose ``part`` is in this list
             (case-insensitive). ``None`` keeps every part.
         augmentations: torchvision v2 transform applied jointly to the image,
             boxes and masks.
@@ -99,30 +95,30 @@ class CocoInstanceDataset(AnomalibDataset):
         ann_file: str | Path,
         root: str | Path,
         split: Split | str,
-        good_root: str | Path | None = None,
-        mask_source: str = "png",
-        mask_dir: str = "ground_truth",
+        ignore_classes: list[str] | None = None,
         parts: list[str] | None = None,
         augmentations: v2.Transform | None = None,
     ) -> None:
         super().__init__(augmentations=augmentations)
-        if mask_source not in MASK_SOURCES:
-            msg = f"mask_source must be one of {MASK_SOURCES}, got {mask_source!r}"
-            raise ValueError(msg)
-
         self.root = Path(root)
-        self.good_root = Path(good_root) if good_root else self.root
         self.split = Split(split)
-        self.mask_source = mask_source
-        self.mask_dir = mask_dir
-        self._warned_missing_png = False
 
         with Path(ann_file).open() as f:
             coco = json.load(f)
         self.categories = {cat["id"]: cat["name"] for cat in coco["categories"]}
 
+        unknown = set(ignore_classes or []) - set(self.categories.values())
+        if unknown:
+            msg = f"ignore_classes {sorted(unknown)} are not categories of {ann_file}: {sorted(self.categories.values())}"
+            raise ValueError(msg)
+        ignored_ids = {cat_id for cat_id, name in self.categories.items() if name in set(ignore_classes or [])}
+
         annotations_by_image: dict[int, list[dict]] = {}
+        num_ignored = 0
         for ann in coco["annotations"]:
+            if ann["category_id"] in ignored_ids:
+                num_ignored += 1
+                continue
             annotations_by_image.setdefault(ann["image_id"], []).append(ann)
 
         keep_parts = {part.lower() for part in parts} if parts else None
@@ -132,16 +128,15 @@ class CocoInstanceDataset(AnomalibDataset):
         self._annotations: dict[str, list[dict]] = {}
         num_dropped = 0
         for img in coco["images"]:
-            part = str(img.get("model_id", "unknown")).lower()
-            if keep_parts is not None and part not in keep_parts:
+            part = str(img.get("part", "unknown"))
+            if keep_parts is not None and part.lower() not in keep_parts:
                 continue
-            is_good = img.get("source") == "good"
+            is_good = bool(img.get("is_good", False))
             anns = annotations_by_image.get(img["id"], [])
             if not is_good and not anns:
                 num_dropped += 1
                 continue
-            base = self.good_root if is_good else self.root
-            image_path = str(base / img["file_name"].replace("\\", "/"))
+            image_path = str(self.root / img["file_name"].replace("\\", "/"))
             self._annotations[image_path] = [] if is_good else anns
             rows.append({
                 "image_path": image_path,
@@ -151,9 +146,11 @@ class CocoInstanceDataset(AnomalibDataset):
                 "part": part,
             })
 
+        if num_ignored:
+            log.info("%s: %d instance(s) of %s treated as background.", Path(ann_file).name, num_ignored, ignore_classes)
         if num_dropped:
             log.warning(
-                "%s: dropped %d defect image(s) with no annotations (missing masks).", Path(ann_file).name, num_dropped,
+                "%s: dropped %d defect image(s) with no (remaining) annotations.", Path(ann_file).name, num_dropped,
             )
         if not rows:
             msg = f"No usable images in {ann_file} (parts={parts})."
@@ -162,7 +159,7 @@ class CocoInstanceDataset(AnomalibDataset):
         if missing:
             msg = (
                 f"{len(missing)} of {len(rows)} images listed in {ann_file} were not found, e.g. {missing[0]}. "
-                f"Check root={self.root} and good_root={self.good_root}."
+                f"Check root={self.root}."
             )
             raise FileNotFoundError(msg)
 
@@ -178,22 +175,6 @@ class CocoInstanceDataset(AnomalibDataset):
         """Collate into :class:`InstanceBatch`, keeping instance fields as per-image lists."""
         return InstanceBatch.collate
 
-    def _read_png_masks(self, image_path: Path) -> dict[tuple[int, ...], np.ndarray]:
-        """Read one image's per-instance mask PNGs, keyed by ``(x, y, w, h, area)``.
-
-        The key is what ``convert_coco.py`` stored as each annotation's
-        ``bbox`` and ``area``, so it identifies the PNG an annotation came from.
-        """
-        masks = {}
-        for mask_file in sorted((image_path.parent.parent / self.mask_dir).glob(f"{image_path.stem}_*_defect_*.png")):
-            mask = np.array(PILImage.open(mask_file).convert("L")) > 0
-            if not mask.any():
-                continue
-            rows, cols = np.where(mask)
-            key = (cols.min(), rows.min(), cols.max() - cols.min() + 1, rows.max() - rows.min() + 1, mask.sum())
-            masks[tuple(int(value) for value in key)] = mask.astype(np.uint8)
-        return masks
-
     def __getitem__(self, index: int) -> InstanceItem:
         """Load one image with its binary mask and instance annotations."""
         sample = self.samples.iloc[index]
@@ -203,26 +184,9 @@ class CocoInstanceDataset(AnomalibDataset):
         image = Image(read_image(image_path, as_tensor=True))
         height, width = image.shape[-2:]
 
-        png_masks = self._read_png_masks(Path(image_path)) if self.mask_source == "png" and anns else {}
-        instance_masks = np.zeros((len(anns), height, width), dtype=np.uint8)
-        num_from_polygons = 0
+        masks = np.zeros((len(anns), height, width), dtype=np.uint8)
         for i, ann in enumerate(anns):
-            mask = png_masks.get((*(int(value) for value in ann["bbox"]), int(ann["area"])))
-            if mask is None:
-                num_from_polygons += 1
-                mask = polygons_to_mask(ann["segmentation"], height, width)
-            instance_masks[i] = mask
-        if self.mask_source == "png" and num_from_polygons and not self._warned_missing_png:
-            log.warning(
-                "%d of %d instances of %s have no matching mask PNG; using rasterised polygons for them.",
-                num_from_polygons, len(anns), image_path,
-            )
-            self._warned_missing_png = True
-
-        # Union of every PNG (not just the annotated ones) so the binary mask
-        # equals the one the one-class methods are scored against.
-        semantic = np.any(list(png_masks.values()), axis=0) if png_masks else instance_masks.any(axis=0)
-        semantic = semantic.astype(np.uint8)
+            masks[i] = segmentation_to_mask(ann["segmentation"], height, width)
 
         # COCO boxes are [x, y, w, h]; torchvision detection models want xyxy.
         boxes = torch.tensor([ann["bbox"] for ann in anns], dtype=torch.float32).reshape(-1, 4)
@@ -230,10 +194,9 @@ class CocoInstanceDataset(AnomalibDataset):
         target = {
             "boxes": BoundingBoxes(boxes, format="XYXY", canvas_size=(height, width)),
             "classes": torch.tensor([ann["category_id"] for ann in anns], dtype=torch.int64),
-            "semantic": Mask(torch.from_numpy(semantic)[None]),
         }
         if anns:
-            target["masks"] = Mask(torch.from_numpy(instance_masks))
+            target["masks"] = Mask(torch.from_numpy(masks))
 
         if self.augmentations:
             image, target = self.augmentations(image, target)
@@ -242,6 +205,7 @@ class CocoInstanceDataset(AnomalibDataset):
         boxes = target["boxes"].as_subclass(torch.Tensor)
         classes = target["classes"]
         masks = target["masks"].as_subclass(torch.Tensor) if anns else torch.zeros((0, height, width), dtype=torch.uint8)
+        gt_mask = masks.bool().any(dim=0) if anns else torch.zeros((height, width), dtype=torch.bool)
 
         # A crop can push an instance (partly) out of frame: drop instances
         # whose box collapsed or whose mask is empty, as torchvision rejects them.
@@ -250,7 +214,7 @@ class CocoInstanceDataset(AnomalibDataset):
 
         return InstanceItem(
             image=image,
-            gt_mask=Mask(target["semantic"].as_subclass(torch.Tensor)[0]),
+            gt_mask=Mask(gt_mask),
             gt_label=torch.tensor(int(sample.label_index)),
             image_path=image_path,
             gt_boxes=boxes[valid],
@@ -267,17 +231,17 @@ class CocoInstanceDataModule(AnomalibDataModule):
     val/test stay where the annotation files put them.
 
     Args:
-        root: Directory the COCO ``file_name`` values are relative to.
+        root: Directory the COCO ``file_name`` values are relative to (the
+            ``3d-adam-full-masked`` root for files from
+            ``build_coco_annotations.py``).
         train_ann_file / val_ann_file / test_ann_file: COCO JSON per split.
-        good_root: Directory that ``"source": "good"`` entries are relative
-            to. Defaults to ``root``.
+        ignore_classes: Category names to treat as background in every
+            split; see :class:`CocoInstanceDataset`.
         name: Dataset name, used in the results directory.
         category: Category label, used in the results directory.
         train_batch_size / eval_batch_size / num_workers: Dataloader settings.
         train_augment: Apply :func:`build_train_augmentations` to training data.
         crop_size / resize_range: Parameters of the training augmentation.
-        mask_source: ``"png"`` or ``"polygon"``; see :class:`CocoInstanceDataset`.
-        mask_dir: Name of the directory holding per-instance mask PNGs.
         test_parts: Restrict the *test* split to these parts. Validation
             stays pooled so thresholds remain shared across parts.
         seed: Unused by the explicit splits; accepted for config parity.
@@ -289,7 +253,7 @@ class CocoInstanceDataModule(AnomalibDataModule):
         train_ann_file: str | Path,
         val_ann_file: str | Path,
         test_ann_file: str | Path,
-        good_root: str | Path | None = None,
+        ignore_classes: list[str] | None = None,
         name: str = "adam3d",
         category: str = "unified",
         train_batch_size: int = 4,
@@ -298,8 +262,6 @@ class CocoInstanceDataModule(AnomalibDataModule):
         train_augment: bool = True,
         crop_size: int = 1024,
         resize_range: tuple[int, int] = (1024, 1434),
-        mask_source: str = "png",
-        mask_dir: str = "ground_truth",
         test_parts: list[str] | None = None,
         seed: int | None = None,
     ) -> None:
@@ -313,12 +275,10 @@ class CocoInstanceDataModule(AnomalibDataModule):
             seed=seed,
         )
         self.root = Path(root)
-        self.good_root = Path(good_root) if good_root else None
         self.train_ann_file = Path(train_ann_file)
         self.val_ann_file = Path(val_ann_file)
         self.test_ann_file = Path(test_ann_file)
-        self.mask_source = mask_source
-        self.mask_dir = mask_dir
+        self.ignore_classes = list(ignore_classes) if ignore_classes else None
         self.test_parts = list(test_parts) if test_parts else None
         self._name = name
         self._category = category
@@ -329,15 +289,36 @@ class CocoInstanceDataModule(AnomalibDataModule):
         return self._name
 
     def _setup(self, _stage: str | None = None) -> None:
-        shared = {
-            "root": self.root,
-            "good_root": self.good_root,
-            "mask_source": self.mask_source,
-            "mask_dir": self.mask_dir,
-        }
+        shared = {"root": self.root, "ignore_classes": self.ignore_classes}
         self.train_data = CocoInstanceDataset(self.train_ann_file, split=Split.TRAIN, **shared)
         self.val_data = CocoInstanceDataset(self.val_ann_file, split=Split.VAL, **shared)
         self.test_data = CocoInstanceDataset(self.test_ann_file, split=Split.TEST, parts=self.test_parts, **shared)
+
+    def _dataloader(self, dataset: CocoInstanceDataset, batch_size: int, shuffle: bool) -> DataLoader:
+        """Like anomalib's loaders, but keeps workers alive and pins host memory.
+
+        Without ``persistent_workers`` every validation pass restarts the
+        workers, and on Windows each restart re-imports torch and anomalib in
+        a fresh process.
+        """
+        return DataLoader(
+            dataset=dataset,
+            shuffle=shuffle,
+            batch_size=batch_size,
+            num_workers=self.num_workers,
+            collate_fn=dataset.collate_fn,
+            persistent_workers=self.num_workers > 0,
+            pin_memory=torch.cuda.is_available(),
+        )
+
+    def train_dataloader(self) -> DataLoader:
+        return self._dataloader(self.train_data, self.train_batch_size, shuffle=True)
+
+    def val_dataloader(self) -> DataLoader:
+        return self._dataloader(self.val_data, self.eval_batch_size, shuffle=False)
+
+    def test_dataloader(self) -> DataLoader:
+        return self._dataloader(self.test_data, self.eval_batch_size, shuffle=False)
 
     def _create_test_split(self) -> None:
         """Keep the test split as given.

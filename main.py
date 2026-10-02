@@ -100,7 +100,7 @@ def discover_parts(data_spec: dict[str, Any]) -> list[str]:
     with Path(data_spec["init_args"]["test_ann_file"]).open() as ann_file:
         coco = json.load(ann_file)
     annotated = {ann["image_id"] for ann in coco["annotations"]}
-    return sorted({str(img.get("model_id", "unknown")).lower() for img in coco["images"] if img["id"] in annotated})
+    return sorted({str(img.get("part", "unknown")) for img in coco["images"] if img["id"] in annotated})
 
 
 def _save_per_image_metrics(engine: Engine, model: Any, datamodule: Any, output_dir: Path, part: str) -> None:
@@ -151,6 +151,9 @@ def run_experiment(
         mode="max",
         save_last=True,
         auto_insert_metric_name=False,
+        # A re-run replaces best.ckpt / last.ckpt (as it replaces metrics.csv)
+        # instead of adding best-v1.ckpt beside the previous run's files.
+        enable_version_counter=False,
     )
     engine = build_engine(config, logger, checkpoint)
 

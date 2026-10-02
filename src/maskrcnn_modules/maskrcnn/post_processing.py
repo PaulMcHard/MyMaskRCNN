@@ -15,11 +15,15 @@ threshold in a fraction of the memory.
 
 from __future__ import annotations
 
+import logging
+
 import torch
 from anomalib.metrics.base import AnomalibMetric
 from anomalib.post_processing import PostProcessor
 from torchmetrics import Metric
 from torchmetrics.utilities import dim_zero_cat
+
+log = logging.getLogger(__name__)
 
 
 class _SparseF1AdaptiveThreshold(Metric):
@@ -94,7 +98,13 @@ class SparseF1AdaptiveThreshold(AnomalibMetric, _SparseF1AdaptiveThreshold):  # 
 
 
 class DetectionPostProcessor(PostProcessor):
-    """anomalib's post-processor with a memory-bounded pixel threshold fit.
+    """anomalib's post-processor with two changes for detector outputs.
+
+    1. A memory-bounded pixel threshold fit (:class:`SparseF1AdaptiveThreshold`).
+    2. Normalisation that survives a validation set with a single score value.
+       A detector that finds nothing on validation (an early or under-trained
+       checkpoint) gives ``min == max == 0``; anomalib then divides by zero and
+       every test score becomes NaN, which silently corrupts every metric.
 
     Everything else (image threshold, min-max normalisation, how thresholds
     are applied at test time) is the stock behaviour, so operating points are
@@ -104,3 +114,28 @@ class DetectionPostProcessor(PostProcessor):
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self._pixel_threshold_metric = SparseF1AdaptiveThreshold(fields=["anomaly_map", "gt_mask"], strict=False)
+
+    def on_validation_epoch_end(self, trainer, pl_module) -> None:  # noqa: ANN001
+        super().on_validation_epoch_end(trainer, pl_module)
+        if self.enable_normalization and not self.image_max.isnan() and self.image_max <= self.image_min:
+            log.warning(
+                "Every validation image got the same anomaly score (%.4f): the model detected nothing above "
+                "box_score_thresh. Test metrics will describe a model that flags nothing.",
+                float(self.image_max),
+            )
+
+    @staticmethod
+    def _normalize(
+        preds: torch.Tensor | None,
+        norm_min: torch.Tensor,
+        norm_max: torch.Tensor,
+        threshold: torch.Tensor,
+    ) -> torch.Tensor | None:
+        """Stock min-max normalisation, with a unit range when validation saw only one value.
+
+        With the unit range, scores keep their order and anything above the
+        threshold still maps above the 0.5 operating point.
+        """
+        if preds is not None and not norm_min.isnan() and not norm_max.isnan() and norm_max <= norm_min:
+            norm_max = norm_min + 1
+        return PostProcessor._normalize(preds, norm_min, norm_max, threshold)

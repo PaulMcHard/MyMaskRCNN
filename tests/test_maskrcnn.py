@@ -76,6 +76,14 @@ def test_test_before_thresholds_are_fitted_is_refused(tmp_path, datamodule_kwarg
         _engine(tmp_path).test(model=model, datamodule=datamodule)
 
 
+def test_too_few_classes_for_the_annotations_is_refused(tmp_path, datamodule_kwargs):
+    model = MaskRCNN(num_classes=8, pretrained="none", min_size=64, max_size=80, visualizer=False)
+    datamodule = CocoInstanceDataModule(**datamodule_kwargs)
+
+    with pytest.raises(ValueError, match="set num_classes to at least 12"):
+        _engine(tmp_path, max_steps=1).fit(model=model, datamodule=datamodule)
+
+
 def test_fit_validate_test_predict_through_engine(tmp_path, datamodule_kwargs):
     seed_everything(0)
     model = MaskRCNN(pretrained="none", min_size=64, max_size=80, visualizer=False)

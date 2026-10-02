@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 from anomalib.metrics import F1AdaptiveThreshold
+from anomalib.post_processing import PostProcessor
 
 from maskrcnn_modules.maskrcnn.post_processing import DetectionPostProcessor, SparseF1AdaptiveThreshold
 
@@ -84,3 +85,36 @@ def test_detection_post_processor_uses_the_sparse_pixel_threshold():
 
     assert isinstance(post_processor._pixel_threshold_metric, SparseF1AdaptiveThreshold)
     assert isinstance(post_processor._image_threshold_metric, F1AdaptiveThreshold)
+
+
+def test_normalisation_survives_a_validation_set_with_one_score_value():
+    """A model that detects nothing on validation must not turn test scores into NaN."""
+    post_processor = DetectionPostProcessor()
+    zero = torch.tensor(0.0)
+    for name in ("_image_threshold", "_pixel_threshold", "image_min", "image_max", "pixel_min", "pixel_max"):
+        getattr(post_processor, name).copy_(zero)
+    batch = SimpleNamespace(
+        pred_score=torch.tensor([0.0, 0.3]),
+        anomaly_map=torch.tensor([[[0.0, 0.0]], [[0.0, 0.3]]]),
+        pred_label=None,
+        pred_mask=None,
+    )
+
+    post_processor.post_process_batch(batch)
+
+    assert not batch.pred_score.isnan().any()
+    assert not batch.anomaly_map.isnan().any()
+    assert batch.pred_label.tolist() == [False, True]
+    assert batch.pred_mask.flatten().tolist() == [False, False, False, True]
+
+
+def test_normalisation_is_stock_when_validation_scores_vary():
+    post_processor = DetectionPostProcessor()
+    for name, value in {"_image_threshold": 0.4, "image_min": 0.0, "image_max": 0.8}.items():
+        getattr(post_processor, name).copy_(torch.tensor(value))
+    scores = torch.tensor([0.0, 0.4, 0.8])
+
+    ours = post_processor._normalize(scores, post_processor.image_min, post_processor.image_max, post_processor.image_threshold)
+    stock = PostProcessor._normalize(scores, post_processor.image_min, post_processor.image_max, post_processor.image_threshold)
+
+    assert torch.equal(ours, stock)

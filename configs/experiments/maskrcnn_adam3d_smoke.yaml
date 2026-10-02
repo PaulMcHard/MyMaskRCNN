@@ -1,9 +1,20 @@
-# Smoke test on real data: two parts, 50 steps, no W&B. Checks the whole
-# pipeline (data, training, threshold fit, per-part + pooled test, CSVs) in a
-# few minutes. The metrics themselves are meaningless at this training length.
+# Smoke test on real data: two parts, 300 steps, no W&B. Checks the whole
+# pipeline (data, training, threshold fit, per-part test, CSVs). On the P2000
+# it took 21 minutes at batch 2: training ran at 3.8 s/step, not the 1.1 s/step
+# measured in isolation, because inside the full run batch 2 spills out of GPU
+# memory. 300 steps is enough for confident detections to
+# appear (they start between steps 200 and 300), so the metrics are low but
+# not degenerate. At 50 steps the model detects nothing at all.
 #
 # Run:
 #   python main.py --config configs/experiments/maskrcnn_adam3d_smoke.yaml
+#
+# Sized for a 5 GB GPU (measured on a Quadro P2000 with ~3.9 GB free):
+#   train batch 1: 0.61 s/step, 2.1 GB    train batch 2: 1.12 s/step, 3.7 GB
+#   train batch 3: does not fit; Windows spills it into system RAM, ~11 s/step
+# Batch 2 leaves ~0.25 GB free; if other apps take that, steps slow ~10x. Batch 1
+# (lr 0.0025) gives 93% of the throughput with 1.6 GB more headroom.
+# Validation speed does not depend on batch size.
 
 experiment:
   name: maskrcnn_adam3d_smoke
@@ -11,37 +22,42 @@ experiment:
   supervision_regime: fully_supervised
   save_per_image_metrics: true
   test_pooled: false
-  parts: [1m1, tapa3m1]
+  parts: [1M3, 4M2]
 model:
   class_path: maskrcnn_modules.maskrcnn.MaskRCNN
   init_args:
-    num_classes: 8
+    num_classes: 12           # 11 defect types + background
     backbone: resnet50
     pretrained: coco
     min_size: 1024
     max_size: 1280
-    lr: 0.01
-    warmup_steps: 10
+    lr: 0.005                 # 0.01 at batch 4, scaled linearly to batch 2
+    warmup_steps: 15          # warm-up is capped at 5% of max_steps
     log_val_loss: true
     visualizer: false
 data:
   class_path: maskrcnn_modules.data.CocoInstanceDataModule
   init_args:
-    root: ./datasets/adam3d_supervised
-    good_root: D:/Data/3d-adam-full-masked
-    train_ann_file: adam3d/annotations_train.json
-    val_ann_file: adam3d/annotations_val_good.json
-    test_ann_file: adam3d/annotations_test_good.json
+    # Root of 3d-adam-full-masked: the annotation file_name values are relative to it.
+    root: D:/Data/3d-adam-full-masked
+    train_ann_file: adam3d/superdefect_default/annotations_train.json
+    val_ann_file: adam3d/superdefect_default/annotations_val.json
+    test_ann_file: adam3d/superdefect_default/annotations_test.json
+    # Defect types to treat as background in training and evaluation. Empty
+    # keeps every annotated defect. SuperDefect's default.yaml ignores
+    # [gap, mark, roughess, scratch, warp]; the equivalent here is
+    # [gap, mark, scratch, warp] (no roughess masks exist in the Nano images).
+    ignore_classes: []
     train_batch_size: 2
     eval_batch_size: 2
-    num_workers: 2
+    num_workers: 2            # one worker prepares ~9 images/s; the GPU trains ~1.7 images/s
 trainer:
-  accelerator: auto
+  accelerator: gpu               # fail instead of silently training on the CPU
   devices: 1
-  precision: 32
-  max_steps: 50
-  val_check_interval: 25
+  precision: 32                  # Pascal GPUs run fp16 far slower than fp32: no mixed precision
+  max_steps: 300
+  val_check_interval: 150
   check_val_every_n_epoch: null
-  limit_val_batches: 20           # 40 validation images instead of all ~380
+  limit_val_batches: 20          # 40 validation images (batch 2) instead of all 336
   log_every_n_steps: 5
 results_dir: ./results

@@ -2,8 +2,18 @@
 # runs (train_tb.py). torchvision has no COCO detector weights for this
 # backbone, so only the backbone is pretrained (ImageNet).
 #
-# Differs from maskrcnn_adam3d.yaml in `experiment.name`, `model.backbone`,
-# `model.pretrained`, `data.train_batch_size` and `logging.wandb.group`.
+# Batch 1: lr, max_steps, warmup and validation interval are scaled from the
+# batch-4 recipe (lr 0.01, 20000 steps) so the model sees the same 80,000
+# training images with the same schedule shape.
+#
+# Sized for a Quadro P2000 (5 GB, ~3.7 GB free). Measured at batch 1:
+#   trainable_backbone_layers 3: 4.0 GB  -> does not fit (spills to system RAM)
+#   trainable_backbone_layers 2: 3.6 GB  -> too tight once the full run's overhead is added
+#   trainable_backbone_layers 1: 2.0 GB, 0.95 s/step -> ~21 h training + ~3.5 h validation
+# Freezing all but the last backbone stage departs from the MMDetection recipe
+# (frozen_stages=1, i.e. 3 trainable stages) and may cost accuracy, since this
+# backbone has ImageNet weights only. On a GPU with 8 GB or more free, set
+# trainable_backbone_layers back to 3.
 #
 # Run:
 #   python main.py --config configs/experiments/maskrcnn_x101_adam3d.yaml
@@ -17,41 +27,45 @@ experiment:
 model:
   class_path: maskrcnn_modules.maskrcnn.MaskRCNN
   init_args:
-    num_classes: 8
+    num_classes: 12           # 11 defect types + background
     backbone: resnext101_64x4d
     pretrained: imagenet
-    trainable_backbone_layers: 3
+    trainable_backbone_layers: 1  # fits a 5 GB GPU; 3 matches MMDetection (see header)
     min_size: 1024
     max_size: 1280
     box_score_thresh: 0.05
     box_detections_per_img: 100
-    lr: 0.01
+    lr: 0.0025                # 0.01 at batch 4, scaled linearly to batch 1
     momentum: 0.9
     weight_decay: 0.001
-    warmup_steps: 500
+    warmup_steps: 2000
     gradient_clip_val: 35.0
     log_val_loss: true
 data:
   class_path: maskrcnn_modules.data.CocoInstanceDataModule
   init_args:
-    root: ./datasets/adam3d_supervised
-    good_root: D:/Data/3d-adam-full-masked
-    train_ann_file: adam3d/annotations_train.json
-    val_ann_file: adam3d/annotations_val_good.json
-    test_ann_file: adam3d/annotations_test_good.json
-    train_batch_size: 2           # the larger backbone needs more GPU memory per image
-    eval_batch_size: 2
-    num_workers: 8
+    # Root of 3d-adam-full-masked: the annotation file_name values are relative to it.
+    root: D:/Data/3d-adam-full-masked
+    train_ann_file: adam3d/superdefect_default/annotations_train.json
+    val_ann_file: adam3d/superdefect_default/annotations_val.json
+    test_ann_file: adam3d/superdefect_default/annotations_test.json
+    # Defect types to treat as background in training and evaluation. Empty
+    # keeps every annotated defect. SuperDefect's default.yaml ignores
+    # [gap, mark, roughess, scratch, warp]; the equivalent here is
+    # [gap, mark, scratch, warp] (no roughess masks exist in the Nano images).
+    ignore_classes: []
+    train_batch_size: 1           # the larger backbone needs more GPU memory per image
+    eval_batch_size: 1
+    num_workers: 2            # one worker prepares ~9 images/s; the GPU trains ~1.7 images/s
     train_augment: true
     crop_size: 1024
     resize_range: [1024, 1434]
-    mask_source: png
 trainer:
-  accelerator: auto
+  accelerator: gpu               # fail instead of silently training on the CPU
   devices: 1
-  precision: 32
-  max_steps: 40000                # same number of images seen as 20000 steps at batch 4
-  val_check_interval: 1000
+  precision: 32                  # Pascal GPUs run fp16 far slower than fp32: no mixed precision
+  max_steps: 80000                # same number of images seen as 20000 steps at batch 4
+  val_check_interval: 4000        # 20 validations of the 336 val images (~10 min each)
   check_val_every_n_epoch: null
   log_every_n_steps: 50
 results_dir: ./results
